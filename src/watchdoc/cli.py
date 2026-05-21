@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import queue
 import sys
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import ocrmypdf
@@ -35,8 +37,12 @@ def _wait_for_settle(path: Path) -> None:
         prev_size = size
 
 
-def _process_pdf(path: Path, output_dir: Path | None) -> str:
-    """OCR a single PDF. Returns 'ok', 'skip', or 'fail'."""
+def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> str:
+    """OCR a single PDF. Returns 'ok', 'skip', or 'fail'.
+
+    jobs=0 means let ocrmypdf decide (cpu_count). jobs=1 is best when
+    the caller already runs multiple PDFs in parallel.
+    """
     if output_dir:
         target = output_dir / path.name
         tmp = None
@@ -44,12 +50,15 @@ def _process_pdf(path: Path, output_dir: Path | None) -> str:
         tmp = path.with_suffix(".pdf.tmp")
         target = tmp
 
+    kwargs: dict = dict(mode="redo", progress_bar=False)
+    if jobs:
+        kwargs["jobs"] = jobs
+
     try:
         result = ocrmypdf.ocr(
             path,
             target,
-            mode="redo",
-            progress_bar=False,
+            **kwargs,
         )
     except Exception as exc:
         console.print(f"  [red]x[/red] {path.name}  [dim]{exc}[/dim]")
@@ -75,22 +84,28 @@ def _process_pdf(path: Path, output_dir: Path | None) -> str:
     return "fail"
 
 
+def _run_one(pdf: Path, output_dir: Path | None) -> str:
+    _suppress_ocrmypdf_logging()
+    if not pdf.exists():
+        return "skip"
+    return _process_pdf(pdf, output_dir, jobs=1)
+
+
 def process_folder(folder: Path, output_dir: Path | None = None) -> None:
     pdfs = sorted(folder.glob("*.pdf"))
     if not pdfs:
         console.print(f"[dim]no PDFs in {folder}[/dim]")
         return
 
-    console.print(f"\n[bold]Processing {len(pdfs)} PDF(s)[/bold] in {folder}\n")
+    workers = min(len(pdfs), os.cpu_count() or 4)
+    console.print(f"\n[bold]Processing {len(pdfs)} PDF(s)[/bold] in {folder}  [dim]({workers} workers)[/dim]\n")
     notify("watchdoc", f"Processing {len(pdfs)} PDF(s)\u2026")
 
     counts: dict[str, int] = {"ok": 0, "skip": 0, "fail": 0}
-    for pdf in pdfs:
-        _wait_for_settle(pdf)
-        if not pdf.exists():
-            continue
-        result = _process_pdf(pdf, output_dir)
-        counts[result] += 1
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_run_one, pdf, output_dir): pdf for pdf in pdfs}
+        for future in as_completed(futures):
+            counts[future.result()] += 1
 
     parts = []
     if counts["ok"]:
