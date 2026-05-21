@@ -14,13 +14,11 @@ Scanned PDFs are just images — Spotlight can't search their text. **watchdoc**
 
 ## Install
 
-Requires [Homebrew](https://brew.sh) and [uv](https://docs.astral.sh/uv/).
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/clstaudt/watchdoc/main/install.sh | sh
 ```
 
-This installs the system dependencies (`tesseract`, `ghostscript`, `terminal-notifier`) and the `watchdoc` CLI in one step.
+This single command installs everything: Homebrew (if missing), uv (if missing), system dependencies (`tesseract`, `ghostscript`, `terminal-notifier`), and the `watchdoc` CLI.
 
 ## Usage
 
