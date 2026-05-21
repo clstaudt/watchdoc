@@ -23,7 +23,7 @@ brew install tesseract ghostscript terminal-notifier
 
 # watchdoc
 echo "Installing watchdoc..."
-uv tool install git+https://github.com/clstaudt/watchdoc.git
+uv tool install --force --reinstall git+https://github.com/clstaudt/watchdoc.git
 
 echo ""
 echo "Done! Run 'watchdoc --help' to get started."
