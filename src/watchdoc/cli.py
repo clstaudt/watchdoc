@@ -21,8 +21,8 @@ from watchdoc.notify import notify
 console = Console()
 
 
-def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> str:
-    """OCR a single PDF. Returns 'ok', 'skip', or 'fail'."""
+def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> tuple[str, str]:
+    """OCR a single PDF. Returns (status, message)."""
     if output_dir:
         target = output_dir / path.name
         tmp = None
@@ -37,33 +37,32 @@ def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> str:
     try:
         result = ocrmypdf.ocr(path, target, **kwargs)
     except Exception as exc:
-        console.print(f"  [red]x[/red] {path.name}  [dim]{exc}[/dim]")
         if tmp and tmp.exists():
             tmp.unlink()
-        return "fail"
+        return "fail", str(exc)
 
     if result == ocrmypdf.ExitCode.ok:
         if tmp:
             tmp.replace(path)
-        console.print(f"  [green]\u2713[/green] {path.name}")
-        return "ok"
+        return "ok", ""
 
     if result == ocrmypdf.ExitCode.already_done_ocr:
         if tmp and tmp.exists():
             tmp.unlink()
-        return "skip"
+        return "skip", ""
 
     if tmp and tmp.exists():
         tmp.unlink()
-    console.print(f"  [red]x[/red] {path.name}  [dim]exit code {result}[/dim]")
-    return "fail"
+    return "fail", str(result)
 
 
-def _run_one(pdf: Path, output_dir: Path | None) -> str:
+def _run_one(pdf: Path, output_dir: Path | None) -> tuple[str, str, str]:
+    """Returns (status, filename, error_message)."""
     _suppress_ocrmypdf_logging()
     if not pdf.exists():
-        return "skip"
-    return _process_pdf(pdf, output_dir, jobs=1)
+        return "skip", pdf.name, ""
+    status, msg = _process_pdf(pdf, output_dir, jobs=1)
+    return status, pdf.name, msg
 
 
 def process_folder(folder: Path, output_dir: Path | None = None) -> None:
@@ -76,14 +75,19 @@ def process_folder(folder: Path, output_dir: Path | None = None) -> None:
 
     counts: dict[str, int] = {"ok": 0, "skip": 0, "fail": 0}
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_run_one, pdf, output_dir): pdf for pdf in pdfs}
+        futures = [pool.submit(_run_one, pdf, output_dir) for pdf in pdfs]
         for future in as_completed(futures):
             try:
-                counts[future.result()] += 1
+                status, name, msg = future.result()
             except Exception as exc:
-                pdf = futures[future]
-                console.print(f"  [red]x[/red] {pdf.name}  [dim]{exc}[/dim]")
+                console.print(f"  [red]x[/red] [dim]{exc}[/dim]")
                 counts["fail"] += 1
+                continue
+            counts[status] += 1
+            if status == "ok":
+                console.print(f"  [green]\u2713[/green] {name}")
+            elif status == "fail":
+                console.print(f"  [red]x[/red] {name}  [dim]{msg}[/dim]")
 
     if counts["ok"] or counts["fail"]:
         parts = []
@@ -128,10 +132,12 @@ class _PDFHandler(FileSystemEventHandler):
                 if not path.exists():
                     console.print("  [dim]file disappeared, skipping[/dim]")
                     continue
-                result = _process_pdf(path, self._output_dir)
-                if result == "ok":
+                status, msg = _process_pdf(path, self._output_dir)
+                if status == "ok":
+                    console.print(f"  [green]\u2713[/green] {path.name}")
                     notify("watchdoc", f"{path.name} indexed")
-                elif result == "fail":
+                elif status == "fail":
+                    console.print(f"  [red]x[/red] {path.name}  [dim]{msg}[/dim]")
                     notify("watchdoc", f"{path.name} failed")
             except Exception as exc:
                 console.print(f"  [red]x[/red] {path.name}  [dim]{exc}[/dim]")
