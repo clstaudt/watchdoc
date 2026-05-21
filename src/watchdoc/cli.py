@@ -15,34 +15,14 @@ from rich.console import Console
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from watchdoc.launchd import install, uninstall
+from watchdoc.launchd import check_deps, install, uninstall
 from watchdoc.notify import notify
 
 console = Console()
 
-SETTLE_INTERVAL = 2
-SETTLE_ATTEMPTS = 10
-
-
-def _wait_for_settle(path: Path) -> None:
-    prev_size = -1
-    for _ in range(SETTLE_ATTEMPTS):
-        time.sleep(SETTLE_INTERVAL)
-        try:
-            size = path.stat().st_size
-        except FileNotFoundError:
-            return
-        if size == prev_size:
-            return
-        prev_size = size
-
 
 def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> str:
-    """OCR a single PDF. Returns 'ok', 'skip', or 'fail'.
-
-    jobs=0 means let ocrmypdf decide (cpu_count). jobs=1 is best when
-    the caller already runs multiple PDFs in parallel.
-    """
+    """OCR a single PDF. Returns 'ok', 'skip', or 'fail'."""
     if output_dir:
         target = output_dir / path.name
         tmp = None
@@ -50,16 +30,12 @@ def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> str:
         tmp = path.with_suffix(".pdf.tmp")
         target = tmp
 
-    kwargs: dict = dict(mode="redo", progress_bar=False)
+    kwargs: dict = dict(mode="skip", progress_bar=False)
     if jobs:
         kwargs["jobs"] = jobs
 
     try:
-        result = ocrmypdf.ocr(
-            path,
-            target,
-            **kwargs,
-        )
+        result = ocrmypdf.ocr(path, target, **kwargs)
     except Exception as exc:
         console.print(f"  [red]x[/red] {path.name}  [dim]{exc}[/dim]")
         if tmp and tmp.exists():
@@ -75,7 +51,6 @@ def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> str:
     if result == ocrmypdf.ExitCode.already_done_ocr:
         if tmp and tmp.exists():
             tmp.unlink()
-        console.print(f"  [yellow]\u2013[/yellow] {path.name}  [dim]already has OCR[/dim]")
         return "skip"
 
     if tmp and tmp.exists():
@@ -94,32 +69,42 @@ def _run_one(pdf: Path, output_dir: Path | None) -> str:
 def process_folder(folder: Path, output_dir: Path | None = None) -> None:
     pdfs = sorted(folder.glob("*.pdf"))
     if not pdfs:
-        console.print(f"[dim]no PDFs in {folder}[/dim]")
         return
 
     workers = min(len(pdfs), os.cpu_count() or 4)
     console.print(f"\n[bold]Processing {len(pdfs)} PDF(s)[/bold] in {folder}  [dim]({workers} workers)[/dim]\n")
-    notify("watchdoc", f"Processing {len(pdfs)} PDF(s)\u2026")
 
     counts: dict[str, int] = {"ok": 0, "skip": 0, "fail": 0}
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_run_one, pdf, output_dir): pdf for pdf in pdfs}
         for future in as_completed(futures):
-            counts[future.result()] += 1
+            try:
+                counts[future.result()] += 1
+            except Exception as exc:
+                pdf = futures[future]
+                console.print(f"  [red]x[/red] {pdf.name}  [dim]{exc}[/dim]")
+                counts["fail"] += 1
 
-    parts = []
-    if counts["ok"]:
-        parts.append(f"[green]{counts['ok']} processed[/green]")
-    if counts["skip"]:
-        parts.append(f"[yellow]{counts['skip']} skipped[/yellow]")
-    if counts["fail"]:
-        parts.append(f"[red]{counts['fail']} failed[/red]")
-    console.print(f"\n[bold]Done[/bold] \u2014 {', '.join(parts)}\n")
-    notify("watchdoc", f"Done \u2014 {counts['ok']} processed, {counts['skip']} skipped, {counts['fail']} failed")
+    if counts["ok"] or counts["fail"]:
+        parts = []
+        if counts["ok"]:
+            parts.append(f"[green]{counts['ok']} indexed[/green]")
+        if counts["fail"]:
+            parts.append(f"[red]{counts['fail']} failed[/red]")
+        summary = ", ".join(parts)
+        console.print(f"\n[bold]Done[/bold] \u2014 {summary}\n")
+
+        nparts = []
+        if counts["ok"]:
+            nparts.append(f"{counts['ok']} indexed")
+        if counts["fail"]:
+            nparts.append(f"{counts['fail']} failed")
+        notify("watchdoc", ", ".join(nparts))
+    elif counts["skip"]:
+        console.print(f"\n[dim]nothing new to OCR[/dim]\n")
 
 
 class _PDFHandler(FileSystemEventHandler):
-    """Enqueues new PDFs for processing on a worker thread."""
 
     def __init__(self, output_dir: Path | None) -> None:
         self._output_dir = output_dir
@@ -137,16 +122,20 @@ class _PDFHandler(FileSystemEventHandler):
     def _drain(self) -> None:
         while True:
             path = self._q.get()
-            console.print(f"\n[bold cyan]\u25cf[/bold cyan] [bold]{path.name}[/bold] detected")
-            _wait_for_settle(path)
-            if not path.exists():
-                console.print("  [dim]file disappeared, skipping[/dim]")
-                continue
-            notify("watchdoc", f"Processing {path.name}\u2026")
-            with console.status("  OCR in progress\u2026", spinner="dots"):
+            try:
+                console.print(f"\n[bold cyan]\u25cf[/bold cyan] [bold]{path.name}[/bold] detected")
+                time.sleep(2)
+                if not path.exists():
+                    console.print("  [dim]file disappeared, skipping[/dim]")
+                    continue
                 result = _process_pdf(path, self._output_dir)
-            if result == "ok":
-                notify("watchdoc", f"Done \u2014 {path.name}")
+                if result == "ok":
+                    notify("watchdoc", f"{path.name} indexed")
+                elif result == "fail":
+                    notify("watchdoc", f"{path.name} failed")
+            except Exception as exc:
+                console.print(f"  [red]x[/red] {path.name}  [dim]{exc}[/dim]")
+                notify("watchdoc", f"{path.name} failed")
 
 
 def watch_folder(folder: Path, output_dir: Path | None = None) -> None:
@@ -180,7 +169,7 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command")
 
-    run_p = sub.add_parser("run", help="Process existing PDFs in a folder and exit")
+    run_p = sub.add_parser("run", help="Process all PDFs in a folder and exit")
     run_p.add_argument("folder", type=Path, help="Folder containing PDFs")
     run_p.add_argument(
         "--output-dir",
@@ -202,6 +191,7 @@ def main() -> None:
     inst_p.add_argument("folder", type=Path, help="Folder to watch")
 
     sub.add_parser("uninstall", help="Remove launchd agent")
+    sub.add_parser("deps", help="Check system dependencies")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING)
@@ -235,6 +225,9 @@ def main() -> None:
 
     elif args.command == "uninstall":
         uninstall()
+
+    elif args.command == "deps":
+        check_deps()
 
     else:
         parser.print_help()

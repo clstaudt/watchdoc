@@ -2,11 +2,18 @@
 name = "watchdoc"
 version = "0.1.0"
 description = "Watch a folder and OCR PDFs for Spotlight indexing"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
+keywords = ["ocr", "pdf", "spotlight", "macos", "watchdog"]
 dependencies = [
     "ocrmypdf>=16.0",
     "watchdog>=4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/clstaudt/watchdoc"
+Repository = "https://github.com/clstaudt/watchdoc"
 
 [project.scripts]
 watchdoc = "watchdoc.cli:main"
