@@ -30,7 +30,7 @@ def _process_pdf(path: Path, output_dir: Path | None, *, jobs: int = 0) -> tuple
         tmp = path.with_suffix(".pdf.tmp")
         target = tmp
 
-    kwargs: dict = dict(mode="skip", progress_bar=False)
+    kwargs: dict = dict(skip_text=True, progress_bar=False)
     if jobs:
         kwargs["jobs"] = jobs
 
